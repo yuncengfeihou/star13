@@ -911,19 +911,16 @@ async function handlePreviewButtonClick() {
         }
 
         // --- 新增：步骤 2.5: 重命名聊天 (如果需要) ---
-        const contextForRename = getContext(); // 获取执行重命名时的上下文
+        const contextForRename = getContext();
         if (contextForRename.chatId === targetPreviewChatId && needsRename) {
-            const oldFileName = contextForRename.chatId; // <<<--- GET THE CURRENT CHAT ID AS OLD FILENAME
+            const oldFileName = contextForRename.chatId;
 
-            // --- 添加检查: 确保 oldFileName 有效 ---
             if (!oldFileName || typeof oldFileName !== 'string') {
-                console.error(`${pluginName}: 无法获取有效的旧聊天文件名 (chatId)，跳过重命名。`);
-                toastr.warning('无法获取当前聊天名称，跳过重命名。');
+                // ... (error handling for missing oldFileName) ...
             } else {
                 console.log(`${pluginName}: 准备重命名预览聊天 ${targetPreviewChatId}. 旧文件名: ${oldFileName}`);
                 const previewPrefix = "[收藏预览] ";
-                let currentChatName = contextForRename.chatName;
-                // ... (获取 currentChatName 的逻辑不变) ...
+                // ... (logic to determine currentChatName) ...
                  if (!currentChatName) {
                      if (contextForRename.groupId) {
                          const group = contextForRename.groups?.find(g => g.id === contextForRename.groupId);
@@ -936,42 +933,62 @@ async function handlePreviewButtonClick() {
                      console.log(`${pluginName}: 未直接获取到 chatName，使用派生名称: ${currentChatName}`);
                  }
 
-
                 let newName = currentChatName;
-                // 如果旧文件名包含时间戳，我们可能希望在新名称中也保留类似结构，
-                // 但为了简单起见，我们直接用 currentChatName (可能包含角色名)
-                // 如果 currentChatName 已经包含前缀，也跳过
                 if (!currentChatName.startsWith(previewPrefix)) {
                     newName = previewPrefix + currentChatName;
                 }
 
-                // --- 验证和清理 newName ---
                 const finalNewName = typeof newName === 'string' ? newName.trim() : '';
 
                 if (finalNewName && !currentChatName.startsWith(previewPrefix)) {
                     console.log(`${pluginName}: 应用前缀，最终重命名为 "${finalNewName}" (从 "${oldFileName}")`);
                     try {
-                        // --- 正确调用 renameChat ---
-                        await renameChat(oldFileName, finalNewName); // <<<--- PASS BOTH ARGUMENTS
+                        await renameChat(oldFileName, finalNewName);
                         console.log(`${pluginName}: 预览聊天已成功重命名`);
+
+                        // --- *** 新增：更新 targetPreviewChatId 和 extension_settings *** ---
+                        console.log(`${pluginName}: 重命名成功，将 targetPreviewChatId 从 ${targetPreviewChatId} 更新为 ${finalNewName}`);
+                        targetPreviewChatId = finalNewName; // 更新追踪变量为新名称
+
+                        // 更新存储的映射关系
+                        const previewKey = contextForRename.groupId ? `group_${contextForRename.groupId}` : `char_${contextForRename.characterId}`;
+                        if (extension_settings[pluginName].previewChats[previewKey]) {
+                            extension_settings[pluginName].previewChats[previewKey] = targetPreviewChatId;
+                            saveMetadataDebounced(); // 保存更改后的映射
+                            console.log(`${pluginName}: 更新 extension_settings 中的预览映射: ${previewKey} -> ${targetPreviewChatId}`);
+                        } else {
+                             console.warn(`${pluginName}: 无法在 extension_settings 中找到 previewKey ${previewKey} 来更新映射`);
+                        }
+                        // --- *** 更新结束 *** ---
+
                     } catch(renameError) {
                         console.error(`${pluginName}: 重命名预览聊天失败 (尝试从 "${oldFileName}" 重命名为: "${finalNewName}"):`, renameError);
                         toastr.error('重命名预览聊天失败，请检查控制台');
+                        // 如果重命名失败，targetPreviewChatId 保持不变
                     }
                 } else if (currentChatName.startsWith(previewPrefix)) {
-                    console.log(`${pluginName}: 聊天名称已包含前缀，无需重命名: "${currentChatName}" (文件: ${oldFileName})`);
+                     console.log(`${pluginName}: 聊天名称已包含前缀，无需重命名: "${currentChatName}" (文件: ${oldFileName})`);
+                     // 即使无需重命名，也要确保 targetPreviewChatId 是正确的当前 ID
+                     targetPreviewChatId = oldFileName;
                 } else {
-                    console.warn(`${pluginName}: 计算出的新名称无效或为空 ("${finalNewName}")，跳过重命名。原始名称: "${currentChatName}", 文件: ${oldFileName}`);
+                     console.warn(`${pluginName}: 计算出的新名称无效或为空 ("${finalNewName}")，跳过重命名。原始名称: "${currentChatName}", 文件: ${oldFileName}`);
+                     // 跳过重命名，确保 targetPreviewChatId 是正确的当前 ID
+                     targetPreviewChatId = oldFileName;
                 }
-                 // --- 验证结束 ---
-            } // <--- 结束对 oldFileName 的检查
+            }
         } else if (needsRename) {
              console.warn(`${pluginName}: 上下文不匹配或不需要重命名，跳过重命名步骤。Context ChatId: ${contextForRename.chatId}, Target: ${targetPreviewChatId}`);
+             // 确保 targetPreviewChatId 是正确的当前 ID
+             targetPreviewChatId = contextForRename.chatId;
+        } else {
+            // 如果不需要重命名（例如，是切换到已存在的带前缀的聊天），确保 targetPreviewChatId 正确
+            targetPreviewChatId = contextForRename.chatId;
+            console.log(`${pluginName}: 不需要重命名，确认 targetPreviewChatId 为 ${targetPreviewChatId}`);
         }
 
 
         // --- 步骤 3: 清空当前聊天 ---
-        console.log(`${pluginName}: 清空当前 (预览) 聊天 (ID: ${targetPreviewChatId})...`);
+        console.log(`${pluginName}: 清空当前 (预览) 聊天 (ID: ${targetPreviewChatId})...`); // <--- 现在会使用更新后的 ID
         clearChat();
 
         // --- 步骤 4: 等待聊天 DOM 清空 ---
