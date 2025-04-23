@@ -793,30 +793,28 @@ async function triggerReturnNavigation() {
 }
 
 /**
- * 处理预览按钮点击 (Optimized Version 7.0 - No Rename - With UI Changes)
- * 创建或切换到预览聊天，并批量填充收藏的消息，隐藏输入框，添加返回按钮。
+ * 处理预览按钮点击 (包含UI修改和聊天重命名)
+ * 创建或切换到预览聊天，重命名聊天，并批量填充收藏的消息，隐藏输入框，添加返回按钮。
  */
 async function handlePreviewButtonClick() {
-    console.log(`${pluginName}: 预览按钮被点击 (包含UI修改)`);
+    console.log(`${pluginName}: 预览按钮被点击 (包含UI修改和重命名)`);
     toastr.info('正在准备预览聊天...');
 
-    // --- 新增：保存原始上下文 ---
+    // --- 保存原始上下文 ---
     const initialContext = getContext();
     previewState.originalContext = {
         characterId: initialContext.characterId,
         groupId: initialContext.groupId,
         chatId: initialContext.chatId, // 存储进入预览前的 chatId
     };
-    // 重置状态，确保每次点击都是干净的开始 (CHAT_CHANGED 会处理旧状态)
+    // 重置状态
     previewState.isActive = false;
     previewState.previewChatId = null;
-    restoreNormalChatUI(); // 以防万一之前的状态没清理干净
+    restoreNormalChatUI(); // 清理旧UI状态
 
     console.log(`${pluginName}: 保存的原始上下文:`, previewState.originalContext);
 
-
     try {
-        // const initialContext = getContext(); // 移到前面获取
         if (!initialContext.groupId && initialContext.characterId === undefined) {
             console.error(`${pluginName}: 错误: 没有选择角色或群聊`);
             toastr.error('请先选择一个角色或群聊');
@@ -840,26 +838,29 @@ async function handlePreviewButtonClick() {
         const previewKey = groupId ? `group_${groupId}` : `char_${characterId}`;
         const existingPreviewChatId = extension_settings[pluginName].previewChats[previewKey];
         let targetPreviewChatId = existingPreviewChatId;
+        let needsRename = false; // <--- 新增：标记是否需要重命名
 
         // --- 步骤 1: 切换或创建聊天 ---
         if (existingPreviewChatId) {
             console.log(`${pluginName}: 发现现有预览聊天ID: ${existingPreviewChatId}`);
-             if (initialContext.chatId === existingPreviewChatId) {
+            if (initialContext.chatId === existingPreviewChatId) {
                 console.log(`${pluginName}: 已在目标预览聊天 (${existingPreviewChatId})，无需切换。`);
                 targetPreviewChatId = initialContext.chatId; // 确认目标ID
+                needsRename = true; // 即使已在，也检查并确保名称正确
             } else {
                 console.log(`${pluginName}: 正在切换到预览聊天...`);
+                needsRename = true; // 切换过去后需要检查并重命名
                 if (groupId) {
                     await openGroupChat(groupId, existingPreviewChatId);
                 } else {
                     await openCharacterChat(existingPreviewChatId);
                 }
-                // 切换后，等待 CHAT_CHANGED 事件确认 targetPreviewChatId
+                // 等待 CHAT_CHANGED
             }
         } else {
             console.log(`${pluginName}: 未找到预览聊天ID，将创建新聊天`);
             await doNewChat({ deleteCurrentChat: false });
-            const newContextAfterCreation = getContext();
+            const newContextAfterCreation = getContext(); // 创建后立即获取上下文
             targetPreviewChatId = newContextAfterCreation.chatId;
             if (!targetPreviewChatId) {
                 console.error(`${pluginName}: 创建新聊天后无法获取聊天ID`);
@@ -867,16 +868,17 @@ async function handlePreviewButtonClick() {
             }
             console.log(`${pluginName}: 新聊天ID: ${targetPreviewChatId}`);
             extension_settings[pluginName].previewChats[previewKey] = targetPreviewChatId;
-            saveMetadataDebounced();
+            saveMetadataDebounced(); // 保存新的预览聊天ID映射
+            needsRename = true; // 新创建的聊天肯定需要命名
         }
 
         // --- 步骤 2: 等待聊天切换/创建完成 (事件驱动) ---
         const currentContextAfterSwitchAttempt = getContext();
         if (currentContextAfterSwitchAttempt.chatId !== targetPreviewChatId) {
-             console.log(`${pluginName}: Waiting for CHAT_CHANGED event to confirm switch to ${targetPreviewChatId}...`);
-             try {
-                // 使用 Promise 包装事件监听器
+            console.log(`${pluginName}: Waiting for CHAT_CHANGED event to confirm switch to ${targetPreviewChatId}...`);
+            try {
                 targetPreviewChatId = await new Promise((resolve, reject) => {
+                     // ... (Promise 和 Timeout/Listener 逻辑不变) ...
                      const timeout = setTimeout(() => {
                         eventSource.off(event_types.CHAT_CHANGED, listener);
                         reject(new Error(`Waiting for CHAT_CHANGED to ${targetPreviewChatId} timed out after 5 seconds`));
@@ -886,37 +888,77 @@ async function handlePreviewButtonClick() {
                         if (receivedChatId === targetPreviewChatId) {
                              console.log(`${pluginName}: Received expected CHAT_CHANGED event for chatId: ${receivedChatId}`);
                             clearTimeout(timeout);
-                            requestAnimationFrame(() => resolve(receivedChatId)); // 确认是这个 ID
+                            eventSource.off(event_types.CHAT_CHANGED, listener); // 移除监听器
+                            requestAnimationFrame(() => resolve(receivedChatId));
                         } else {
-                            console.log(`${pluginName}: Received CHAT_CHANGED for unexpected chatId ${receivedChatId}, could be intermediate state or error.`);
-                             // 如果 targetPreviewChatId 是新创建的，接收到的可能是旧的 chatId
-                             // 如果 targetPreviewChatId 是已存在的，接收到的可能是旧的 chatId
-                             // 这里需要更健壮的逻辑，或者依赖后续的 getContext 检查
-                             // 为简单起见，我们假设最终会切换到 targetPreviewChatId
-                             // 严格来说，应该在这里继续等待或处理错误
+                             console.log(`${pluginName}: Received CHAT_CHANGED for unexpected chatId ${receivedChatId}, waiting...`);
                         }
                     };
-                    // 使用 once 确保只监听一次
-                    eventSource.once(event_types.CHAT_CHANGED, listener);
+                    // 监听，而不是 once，以防中间状态切换
+                    eventSource.on(event_types.CHAT_CHANGED, listener);
                 });
-                 console.log(`${pluginName}: CHAT_CHANGED event processed. Confirmed target chatId: ${targetPreviewChatId}. UI should be stable.`);
+                console.log(`${pluginName}: CHAT_CHANGED event processed. Confirmed target chatId: ${targetPreviewChatId}.`);
             } catch (error) {
                 console.error(`${pluginName}: Error or timeout waiting for CHAT_CHANGED:`, error);
                 toastr.error('切换到预览聊天时出错或超时，请重试');
-                previewState.originalContext = null; // 清理状态
-                return; // 中断执行
+                previewState.originalContext = null;
+                return;
             }
         } else {
             console.log(`${pluginName}: Already in the target chat or switch completed instantly. Target chatId: ${targetPreviewChatId}`);
             await new Promise(resolve => requestAnimationFrame(resolve)); // 等待一帧确保UI稳定
         }
 
+        // --- 新增：步骤 2.5: 重命名聊天 (如果需要) ---
+        const contextForRename = getContext(); // 获取执行重命名时的上下文
+        if (contextForRename.chatId === targetPreviewChatId && needsRename) {
+            console.log(`${pluginName}: 准备重命名预览聊天 ${targetPreviewChatId}`);
+            const previewPrefix = "[收藏预览] ";
+            // 尝试获取当前聊天名，如果不存在，则根据上下文生成默认名
+            let currentChatName = contextForRename.chatName; // chatName 可能在 context 上
+            if (!currentChatName) {
+                 if (contextForRename.groupId) {
+                     // 尝试从 groups 列表获取群组名
+                     const group = contextForRename.groups?.find(g => g.id === contextForRename.groupId);
+                     currentChatName = group ? group.name : '群聊';
+                 } else if (contextForRename.characterId !== undefined) {
+                     currentChatName = contextForRename.name2 || '角色聊天'; // name2 是角色名
+                 } else {
+                     currentChatName = '新聊天'; // 最后的备选项
+                 }
+                 console.log(`${pluginName}: 未直接获取到 chatName，使用派生名称: ${currentChatName}`);
+            }
+
+            let newName = currentChatName;
+
+            // 防止重复添加前缀
+            if (!currentChatName.startsWith(previewPrefix)) {
+                newName = previewPrefix + currentChatName;
+                console.log(`${pluginName}: 应用前缀，重命名为 "${newName}"`);
+                try {
+                    // 调用 context 提供的 renameChat 函数，传递新名称
+                    // 假设 renameChat(newName) 重命名当前聊天
+                    await renameChat(newName);
+                    console.log(`${pluginName}: 预览聊天已成功重命名`);
+                } catch(renameError) {
+                    console.error(`${pluginName}: 重命名预览聊天失败:`, renameError);
+                    toastr.error('重命名预览聊天失败，请检查控制台');
+                    // 即使重命名失败，也继续后续流程
+                }
+            } else {
+                 console.log(`${pluginName}: 聊天名称已包含前缀，无需重命名: "${currentChatName}"`);
+            }
+        } else if (needsRename) {
+             console.warn(`${pluginName}: 上下文不匹配或不需要重命名，跳过重命名步骤。Context ChatId: ${contextForRename.chatId}, Target: ${targetPreviewChatId}`);
+        }
+        // --- 重命名结束 ---
+
 
         // --- 步骤 3: 清空当前聊天 ---
         console.log(`${pluginName}: 清空当前 (预览) 聊天 (ID: ${targetPreviewChatId})...`);
-        clearChat(); // 清空界面和内部 chat 数组
+        clearChat();
 
-        // --- 步骤 4: 等待聊天 DOM 清空 (条件驱动) ---
+        // --- 步骤 4: 等待聊天 DOM 清空 ---
         console.log(`${pluginName}: Waiting for chat DOM to clear...`);
         try {
             await waitUntilCondition(() => document.querySelectorAll('#chat .mes').length === 0, 2000, 50);
@@ -926,14 +968,13 @@ async function handlePreviewButtonClick() {
             toastr.warning('清空聊天时可能超时，继续尝试填充消息...');
         }
 
-        // --- 新增：步骤 4.5: 设置预览模式 UI ---
-        // 确保我们确实在目标预览聊天中
+        // --- 步骤 4.5: 设置预览模式 UI ---
         const contextBeforeFill = getContext();
         if (contextBeforeFill.chatId !== targetPreviewChatId) {
             console.error(`${pluginName}: Error: Context switched unexpectedly BEFORE setting up UI. Expected ${targetPreviewChatId}, got ${contextBeforeFill.chatId}. Aborting.`);
             toastr.error('无法确认预览聊天环境，操作中止。请重试。');
-            previewState.originalContext = null; // 清理状态
-            restoreNormalChatUI(); // 尝试恢复UI
+            previewState.originalContext = null;
+            restoreNormalChatUI();
             return;
         }
         setupPreviewUI(targetPreviewChatId); // * * * 执行UI修改 * * *
@@ -942,6 +983,7 @@ async function handlePreviewButtonClick() {
         // --- 步骤 5: 准备收藏消息 (健壮查找) ---
         console.log(`${pluginName}: 正在准备收藏消息以填充预览聊天...`);
         const messagesToFill = [];
+        // ... (准备 messagesToFill 的逻辑不变) ...
         for (const favItem of chatMetadata.favorites) {
             const messageIdStr = favItem.messageId;
             const messageIndex = parseInt(messageIdStr, 10);
@@ -966,43 +1008,53 @@ async function handlePreviewButtonClick() {
         messagesToFill.sort((a, b) => a.mesid - b.mesid);
         console.log(`${pluginName}: 找到 ${messagesToFill.length} 条有效收藏消息可以填充`);
 
+
         // --- 步骤 6: 批量填充消息 ---
-        const finalContext = getContext(); // 获取填充操作开始时的最终上下文
-        // *** 再次检查，确保还在预览聊天中 ***
-        if (finalContext.chatId !== targetPreviewChatId) {
-             console.error(`${pluginName}: Error: Context switched unexpectedly during preparation. Expected ${targetPreviewChatId}, got ${finalContext.chatId}. Aborting fill.`);
+        const finalContextForFill = getContext(); // 获取填充操作开始时的最终上下文
+        // *** 再次检查 ***
+        if (finalContextForFill.chatId !== targetPreviewChatId) {
+             console.error(`${pluginName}: Error: Context switched unexpectedly during preparation. Expected ${targetPreviewChatId}, got ${finalContextForFill.chatId}. Aborting fill.`);
              toastr.error('预览聊天环境发生意外变化，填充操作中止。请重试。');
-             restoreNormalChatUI(); // 清理UI
-             previewState.isActive = false; // 重置状态
+             restoreNormalChatUI();
+             previewState.isActive = false;
              previewState.originalContext = null;
              previewState.previewChatId = null;
-             return; // 中断执行
+             return;
         }
-        console.log(`${pluginName}: Confirmed context for chatId ${finalContext.chatId}. Starting batch fill...`);
+        console.log(`${pluginName}: Confirmed context for chatId ${finalContextForFill.chatId}. Starting batch fill...`);
 
         let addedCount = 0;
         const BATCH_SIZE = 20;
+        // ... (批量填充 messagesToFill 的逻辑不变) ...
         for (let i = 0; i < messagesToFill.length; i += BATCH_SIZE) {
             const batch = messagesToFill.slice(i, i + BATCH_SIZE);
             console.log(`${pluginName}: Processing batch ${Math.floor(i / BATCH_SIZE) + 1}/${Math.ceil(messagesToFill.length / BATCH_SIZE)} (${batch.length} messages)`);
             for (const item of batch) {
                 try {
                     const message = item.message;
-                    const originalMesid = item.mesid;
-                    await finalContext.addOneMessage(message, {
+                    const originalMesid = item.mesid; // 使用原始消息的索引
+                    // 注意：forceId 可能不适用于所有 addOneMessage 实现，
+                    // SillyTavern 核心的 addOneMessage 似乎不直接支持 forceId 来强制 *索引*。
+                    // 它通常用于内部消息 ID。这里的目标是尽量保持原始顺序。
+                    // 批量添加本身会按顺序进行，mesid 主要用于排序。
+                    await finalContextForFill.addOneMessage(message, {
                         scroll: false,
-                        forceId: originalMesid
+                        // forceId: originalMesid // 可能无效或引起问题，移除或注释掉
                     });
                     addedCount++;
                 } catch (error) {
-                    console.error(`${pluginName}: Error adding message (original mesid=${item.mesid}):`, error);
+                    console.error(`${pluginName}: Error adding message (original index=${item.mesid}):`, error);
                 }
             }
+            // 添加延迟以允许 UI 渲染
             if (i + BATCH_SIZE < messagesToFill.length) {
-                await new Promise(resolve => requestAnimationFrame(resolve));
+                 await new Promise(resolve => setTimeout(resolve, 50)); // 短暂延迟
+                 // await new Promise(resolve => requestAnimationFrame(resolve)); // 或者按帧延迟
             }
         }
+
         console.log(`${pluginName}: All batches processed. Total messages added: ${addedCount}`);
+
 
         // --- 步骤 7: 完成与最终处理 ---
         if (addedCount > 0) {
@@ -1011,9 +1063,7 @@ async function handlePreviewButtonClick() {
         } else if (messagesToFill.length > 0) {
              console.warn(`${pluginName}: No messages were successfully added, although ${messagesToFill.length} were prepared.`);
              toastr.warning('准备了收藏消息，但未能成功添加到预览中。请检查控制台。');
-             // 即使添加失败，UI 仍然处于预览模式，用户可以通过返回按钮退出
         } else {
-             // 没有消息可添加，但 UI 仍然进入了预览模式（虽然是空的）
              toastr.info('收藏夹为空，已进入（空的）预览模式。点击下方按钮返回。');
         }
 
